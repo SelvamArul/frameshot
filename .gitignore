@@ -1,0 +1,7 @@
+build/
+resource/pcd/shelf.pcd
+resource/*.png
+resource/*.raw
+.kdev4/
+*.kdev4
+
