@@ -29,7 +29,7 @@
 /* pcl::PCLPointCloud2 provides more generic abstract mechnaism to handle the point clouds. Thus avoiding the template based pcl::PointCloud.
 struct PointXYZNIG {
     float x,y,z;
-    float noise;
+    float noise; ${OpenCV_LIBRARIES}
     uint16_t intensity;
     uint8_t gray;
 };

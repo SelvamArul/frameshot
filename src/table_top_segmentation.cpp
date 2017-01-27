@@ -64,15 +64,24 @@ private:
 struct Cluster
 	{
 		pcl::PointIndices::Ptr indices;
+		
+		// Axis-aligned bounding box
+		Eigen::Vector4f aa_center;
+		Eigen::Vector4f aa_extent;
+		Eigen::Vector4f aa_min;
+		Eigen::Vector4f aa_max;
 	};
 
 static const bool VISUALIZE = true;
+static const float CLUSTER_CLOSENESS = 0.005f;
+static const float COMPARATOR_THRESHOLD = 0.1f;
+static const int CLUSTER_MIN_POINTS = 5;
 
 int main(int argc, char **argv){
 	std::string fileName;
 	if(argc < 2){
 		std::cout<<" No argument provided"<<std::endl;
-		std::cout<<"Usage: tts filename.pcd"<<std::endl;
+		std::cout<<"Usage: pcd2png filename.pcd"<<std::endl;
 		return 0;
 	} else {
 		fileName = std::string(argv[1]);
@@ -208,7 +217,8 @@ int main(int argc, char **argv){
 		extract.filter (*horizontalOutliersCloud);
 		
 		}
-		
+	
+	
 	// Fit plane
 	Eigen::Vector4f plane;
 	pcl::ModelCoefficients::Ptr coeffs(new pcl::ModelCoefficients);
@@ -261,9 +271,6 @@ int main(int argc, char **argv){
 
 		planeCenter = ((max + min)/2.0).head<3>();
 
-		Eigen::Vector4f centroid;
-		pcl::compute3DCentroid(*planeHull, centroid);
-
 		// Shrink the hull towards the center
 		for(std::size_t i = 0; i < planeHull->size(); ++i)
 		{
@@ -304,6 +311,7 @@ int main(int argc, char **argv){
 		limiter.setInputCloud(cloud);
 		limiter.setIndices(objectIndices);
 		limiter.segment(*limitedObjectIndices);
+
 		pcl::ExtractIndices<Point> extract;
 		extract.setInputCloud(cloud);
 		extract.setIndices(limitedObjectIndices);
@@ -312,23 +320,23 @@ int main(int argc, char **argv){
 	}
 	
 	std::cout<<"number of limitedObjectPoints "<<limitedObjectPoints->size()<<std::endl;
-	// Visualize 
+	
+	if (VISUALIZE)
 	{
 		pcl::visualization::PCLVisualizer viewer ("ICP visualization");
-
-		viewer.addPolygon<pcl::PointXYZ>(planeHull, 255.0, 0.0, 0.0, "plane");
-
-		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> planeInliersCloud_handler (planeInliersCloud, 0, 0, 255);
-		viewer.addPointCloud (planeInliersCloud, planeInliersCloud_handler, "planeInliersCloud");
+		//pcl::visualization::Camera camera;
+		std::vector<pcl::visualization::Camera>  camera;
+		viewer.getCameras(camera);
 		
+		viewer.addPolygon<pcl::PointXYZ>(planeHull, 255.0, 0.0, 0.0, "plane");
+		
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> planeInliersCloud_handler (planeInliersCloud, 0, 0, 127);
+		viewer.addPointCloud (planeInliersCloud, planeInliersCloud_handler, "planeInliersCloud");
+	
 		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> limitedObjectPoints_handler (limitedObjectPoints, 0, 255, 0);
 		viewer.addPointCloud (limitedObjectPoints, limitedObjectPoints_handler, "limitedObjectPoints");
+ 
 		viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "limitedObjectPoints");
-
-		//pcl::visualization::Camera camera;
-		
-		std::vector<pcl::visualization::Camera> camera;
-		viewer.getCameras(camera);
 		
 		camera[0].focal[0] = 0.0; camera[0].focal[1] = 0.0; camera[0].focal[2] = 0.15; // Look at this point
 		camera[0].pos[0] = 0.0; camera[0].pos[1] = 0.0; camera[0].pos[2] = 0.0;        // camera is at this point
@@ -349,7 +357,6 @@ int main(int argc, char **argv){
 	
 	//Euclidean Clustering
 	std::vector<Cluster> clusters;
-	//ColorPointCloud::Ptr segmentationViz (new ColorPoint);
 	std::vector<pcl::PointIndices> clusterIndices;
 	{
 		std::vector<pcl::PointIndices> clusterIndices;
@@ -371,9 +378,8 @@ int main(int argc, char **argv){
 
 		pcl::PointCloud<pcl::Label>::Ptr labels(new pcl::PointCloud<pcl::Label>);
 
-		boost::shared_ptr<ClusterComparator> comp(new ClusterComparator(0.03));
+		boost::shared_ptr<ClusterComparator> comp(new ClusterComparator(COMPARATOR_THRESHOLD));
 		comp->setInputCloud(organizedMaskedCloud);
-
 		pcl::OrganizedConnectedComponentSegmentation<Point, pcl::Label> segm(comp);
 		segm.setInputCloud(organizedMaskedCloud);
 		segm.segment(*labels, clusterIndices);
@@ -382,45 +388,164 @@ int main(int argc, char **argv){
 		{
 			pcl::PointIndices& indices = clusterIndices[i];
 
-			if(indices.indices.size() < 50)
+			if(indices.indices.size() < CLUSTER_MIN_POINTS)
 				continue;
 
 			Cluster cluster;
 			cluster.indices.reset(new pcl::PointIndices);
 			cluster.indices->indices.swap(indices.indices);
 			
+			// calculate axis aligned bounding box
+			Eigen::Vector4f min, max;
+			pcl::getMinMax3D(*cloud, *cluster.indices, cluster.aa_min, cluster.aa_max);
+			cluster.aa_center = (cluster.aa_max + cluster.aa_min)/2;
+			cluster.aa_extent = (cluster.aa_max - cluster.aa_min)/2;
+			
 			clusters.push_back(cluster);
-			std::cout<<"segmentation found "<<clusterIndices.size()
+			
+			uint32_t color = 0;
+			switch(clusters.size() % 3)
+			{
+				case 0: color = 0xFF0000; break;
+				case 1: color = 0x00FF00; break;
+				case 2: color = 0x0000FF; break;
+			}
+
+			for(std::size_t j = 0; j < cluster.indices->indices.size(); ++j)
+			{
+				int idx = cluster.indices->indices[j];
+				const Point& p = (*cloud)[idx];
+
+				pcl::PointXYZRGB out;
+				out.getVector4fMap() = p.getVector4fMap();
+				out.rgba = color;
+			}
+		}
+		std::cout<<"segmentation found "<<clusterIndices.size()
 					 <<" clusters, we took "<<  clusters.size() <<std::endl;
+		for (std::size_t i =0; i < clusters.size(); i++){
+			std::cout<<i<<" cluster with size "<<clusters[i].indices->indices.size()<<std::endl;
+			
 		}
 	}
 	
-	
-	/*
-	pcl::search::KdTree<Point>::Ptr tree (new pcl::search::KdTree<Point>);
-	tree->setInputCloud (limitedObjectPoints);
-	
-	std::vector<pcl::PointIndices> cluster_indices;
-	 pcl::EuclideanClusterExtraction<Point> ec;
-	ec.setClusterTolerance (0.01);
-	ec.setMinClusterSize (100);
-	ec.setMaxClusterSize (3500);
-	ec.setSearchMethod (tree);
-	ec.setInputCloud (limitedObjectPoints);
-	ec.extract (cluster_indices);
-	
-	int j = 0;
-	for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it){
-		PointCloud::Ptr cloud_cluster (new PointCloud);
-		for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
-			cloud_cluster->points.push_back (limitedObjectPoints->points[*pit]);
-		cloud_cluster->width = cloud_cluster->points.size ();
-		cloud_cluster->height = 1;
-		cloud_cluster->is_dense = true;
-		std::cout << "PointCloud representing the Cluster: " << cloud_cluster->points.size () << " data points." << std::endl;
-		j++;
-	}
-	*/
 
+	float clusterCloseness = 0.005f;
+// 	std::cout<<"Enter cluster closeness "<<std::endl;
+// 	std::cin>>clusterCloseness;
+	
+	// Merge close clusters
+	{
+		for(std::size_t i = 0; i < clusters.size(); ++i)
+		{
+			for(std::size_t j = i+1; j < clusters.size();)
+			{
+				Cluster* current = &clusters[i];
+				Cluster* compare = &clusters[j];
+
+				bool touch[3];
+// 				for(int axis = 0; axis < 3; ++axis)
+// 				{
+// 					float dist = fabsf(compare->aa_center[axis] - current->aa_center[axis]);
+// 					touch[axis] = dist - current->aa_extent[axis] - compare->aa_extent[axis] < clusterCloseness;
+// 				}
+				float dist = fabsf(compare->aa_center[1] - current->aa_center[1]);
+				touch[1] = dist - current->aa_extent[1] - compare->aa_extent[1] < CLUSTER_CLOSENESS;
+				if(touch[1])  // touch[0] && touch[1] && touch[2]
+				{
+					std::cout<<"Merging "<<std::endl;
+					std::copy(
+						compare->indices->indices.begin(), compare->indices->indices.end(),
+						std::back_inserter(current->indices->indices)
+					);
+
+					for(int axis = 0; axis < 3; ++axis)
+					{
+						current->aa_max[axis] = std::max(current->aa_max[axis], compare->aa_max[axis]);
+						current->aa_min[axis] = std::min(current->aa_min[axis], compare->aa_min[axis]);
+					}
+					current->aa_center = (current->aa_max + current->aa_min)/2;
+					current->aa_extent = (current->aa_max - current->aa_min)/2;
+
+					clusters.erase(clusters.begin() + j);
+				}
+				else
+					++j;
+			}
+		}
+	}
+	
+	{
+		//after merging
+		std::cout<<"# of clusters after merging "<<clusters.size()<<std::endl;
+		for (std::size_t i =0; i <clusters.size(); ++i){
+			std::cout<<"Cluster "<<i <<" with points "<<clusters[i].indices->indices.size()<<std::endl;
+		}
+	}
+	
+
+	//visualize the clusters
+	{
+		std::vector<PointCloud::Ptr> ClustersCloud (3);
+		
+		pcl::ExtractIndices<Point> extract;
+		extract.setInputCloud (cloud);
+		
+		for (std::size_t i =0; i <clusters.size(); ++i){
+			ClustersCloud[i].reset(new PointCloud());
+			extract.setIndices (clusters[i].indices);
+			extract.setNegative (false);
+			extract.filter (*ClustersCloud[i]);
+		}
+		
+		pcl::visualization::PCLVisualizer viewer ("ICP visualization");
+
+		viewer.addPolygon<pcl::PointXYZ>(planeHull, 255.0, 0.0, 0.0, "plane");
+
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> planeInliersCloud_handler (planeInliersCloud, 0, 0, 127);
+		viewer.addPointCloud (planeInliersCloud, planeInliersCloud_handler, "planeInliersCloud");
+		
+// 		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> limitedObjectPoints_handler (limitedObjectPoints, 0, 127, 0);
+// 		viewer.addPointCloud (limitedObjectPoints, limitedObjectPoints_handler, "limitedObjectPoints");
+// 		viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "limitedObjectPoints");
+
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> c1_handler (limitedObjectPoints, 0, 255, 0);
+		viewer.addPointCloud (ClustersCloud[0], c1_handler, "c1");
+		viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "c1");
+		
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> c2_handler (limitedObjectPoints, 255, 0, 0);
+		viewer.addPointCloud (ClustersCloud[1], c2_handler, "c2");
+		viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "c2");
+		
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> c3_handler (limitedObjectPoints, 0, 0, 255);
+		viewer.addPointCloud (ClustersCloud[2], c3_handler, "c3");
+		viewer.setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "c3");
+		
+		//pcl::visualization::Camera camera;
+		std::vector<pcl::visualization::Camera>  camera;
+		viewer.getCameras(camera);
+		
+		camera[0].focal[0] = 0.0; camera[0].focal[1] = 0.0; camera[0].focal[2] = 0.15; // Look at this point
+		camera[0].pos[0] = 0.0; camera[0].pos[1] = 0.0; camera[0].pos[2] = 0.0;        // camera is at this point
+		camera[0].view[0] = 0.0; camera[0].view[1] = -1.0; camera[0].view[2] = 0.0;    // This is the "up" direction
+		camera[0].fovy = 45.0 * M_PI / 180.0;
+
+		viewer.setCameraParameters(camera[0]);
+
+		viewer.setBackgroundColor(255.0, 255.0, 255.0);
+
+		while (!viewer.wasStopped ()) { // Display the visualiser until 'q' key is pressed
+			viewer.spinOnce ();
+		}
+		
+		viewer.close();
+		viewer.spinOnce();
+		pcl::PCDWriter writer;
+		
+		writer.writeBinary("cluster0.pcd", *ClustersCloud[0]);
+		writer.writeBinary("cluster1.pcd", *ClustersCloud[1]);
+		writer.writeBinary("cluster2.pcd", *ClustersCloud[2]);
+	}
+	
 	return 0;
 }

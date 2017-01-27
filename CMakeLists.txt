@@ -25,7 +25,7 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 include_directories(EIGEN3_INCLUDE_DIR)
 
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -std=c++11")
 #set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -Wall -std=c++11")
 
 catkin_package(
@@ -51,3 +51,6 @@ add_executable(tts
 target_link_libraries(tts
 	${catkin_LIBRARIES} ${PCL_LIBRARIES}  ${OpenCV_LIBS} libvtkCommon.so libvtkFiltering.so
 )
+
+add_executable(gamma_tuner src/gamma_tuner.cpp)
+target_link_libraries(gamma_tuner  ${OpenCV_LIBS} ${catkin_LIBRARIES})
