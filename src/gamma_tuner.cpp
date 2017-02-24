@@ -13,6 +13,10 @@
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 
+#include <message_filters/subscriber.h>
+#include <message_filters/time_synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
+
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
@@ -27,11 +31,12 @@
 bool g_can_record = false;
 bool g_is_done = false;
 std::string g_package_path =  ros::package::getPath("frameshot");
-std::string g_image_topic = "/vertical_stereo/left/image_raw";
+std::string g_left_image_topic = "/vertical_stereo/left/image_raw";
+std::string g_right_image_topic = "/vertical_stereo/right/image_raw";
 std::string g_param_node_name = "/stereo/multisync_camera_nodelet";  // name of 
 // the node that has gamma param 
-std::vector<cv::Mat> cv_images;
-std::vector<cv::Mat> cv_histograms;
+std::vector<cv::Mat> cv_left_images, cv_right_images;
+std::vector<cv::Mat> cv_left_histograms, cv_right_histograms;
 
 std::string type2str(int type) {
   std::string r;
@@ -56,12 +61,15 @@ std::string type2str(int type) {
   return r;
 }
 
-void imageCallback(const sensor_msgs::ImageConstPtr& msg){
+void stereo_callback(const sensor_msgs::ImageConstPtr& l_msg, const sensor_msgs::ImageConstPtr& r_msg){
 	if (g_can_record == true) {
 		try{
-			cv_bridge::CvImagePtr i_ptr;
-			i_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::MONO8);
-			cv_images.push_back(i_ptr->image);
+			cv_bridge::CvImagePtr l_ptr, r_ptr;
+			l_ptr = cv_bridge::toCvCopy(l_msg, sensor_msgs::image_encodings::MONO8);
+			r_ptr = cv_bridge::toCvCopy(r_msg, sensor_msgs::image_encodings::MONO8);
+
+			cv_left_images.push_back(l_ptr->image);
+			cv_right_images.push_back(r_ptr->image);
 //  			std::cout<<"Image pushed back"<<std::endl;
 			g_can_record = false;
 		} catch (cv_bridge::Exception& e){
@@ -82,7 +90,7 @@ void gammaWatcherCallback() {
 		double_param.name = "gamma";
 		double_param.value = (i * 0.25) + 0.25;
 		conf.doubles.push_back(double_param);
-		
+		std::cout<<"Gamma value to be set "<<(i * 0.25) + 0.25<<std::endl;
 		srv_req.config = conf;
 		bool result = ros::service::call(
 			g_param_node_name + "/set_parameters",
@@ -104,8 +112,14 @@ void gammaWatcherCallback() {
 void save_images() {
 	u_int count = 0;
 	char *filename;
-	for (auto &i : cv_images) {
-		asprintf(&filename, "%s/resource/cvimage_%hhu.png", g_package_path.c_str(), count);
+	for (auto &i : cv_left_images) {
+		asprintf(&filename, "%s/resource/cvimage_left_%hhu.png", g_package_path.c_str(), count);
+		cv::imwrite(filename,i);
+		count++;
+	}
+	count = 0;
+	for (auto &i : cv_right_images) {
+		asprintf(&filename, "%s/resource/cvimage_right_%hhu.png", g_package_path.c_str(), count);
 		cv::imwrite(filename,i);
 		count++;
 	}
@@ -121,11 +135,20 @@ void compute_histograms(){
 	bool uniform = true;
 	bool accumulate = false;
 	
-	cv_histograms.resize(cv_images.size());
-	for (u_int i = 0; i < cv_images.size(); ++i) {
-		cv::calcHist( &cv_images[i], 1, 0, cv::Mat(), cv_histograms[i], 1, &histSize, &histRange, uniform, accumulate );
+	cv_left_histograms.resize(cv_left_images.size());
+	for (u_int i = 0; i < cv_left_images.size(); ++i) {
+		cv::calcHist( &cv_left_images[i], 1, 0, cv::Mat(), cv_left_histograms[i], 1, &histSize, &histRange, uniform, accumulate );
 		double minVal, maxVal;
-		cv::minMaxLoc( cv_histograms[i], &minVal, &maxVal);
+		cv::minMaxLoc( cv_left_histograms[i], &minVal, &maxVal);
+		
+//  		std::cout << "imgtype " << type2str(cv_images[i].type())<<" Hist "<< type2str(cv_histograms[i].type()) << " " 
+//  			<< minVal <<" " <<maxVal<<std::endl;
+	}
+	cv_right_histograms.resize(cv_right_images.size());
+	for (u_int i = 0; i < cv_right_images.size(); ++i) {
+		cv::calcHist( &cv_right_images[i], 1, 0, cv::Mat(), cv_right_histograms[i], 1, &histSize, &histRange, uniform, accumulate );
+		double minVal, maxVal;
+		cv::minMaxLoc( cv_right_histograms[i], &minVal, &maxVal);
 		
 //  		std::cout << "imgtype " << type2str(cv_images[i].type())<<" Hist "<< type2str(cv_histograms[i].type()) << " " 
 //  			<< minVal <<" " <<maxVal<<std::endl;
@@ -174,11 +197,11 @@ void visualizeHistogram(const cv::Mat_<float>& hist,
 // create an uniformly distributed histogram and do dot product with all other histogram
 // The one that has maximum value is what we need
 void compare_histograms(){
-	cv::Mat uniform_histogram (cv_histograms[0].rows,
-							   cv_histograms[0].cols,
-							   cv_histograms[0].type(),
-							   cv::Scalar( cv_images[0].rows * cv_images[0].cols /(cv_histograms[0].rows * cv_histograms[0].cols )));
-	std::vector<float> closeness(cv_images.size(), 0);
+	cv::Mat uniform_histogram (cv_left_histograms[0].rows,
+							   cv_left_histograms[0].cols,
+							   cv_left_histograms[0].type(),
+							   cv::Scalar( cv_left_images[0].rows * cv_left_images[0].cols /(cv_left_images[0].rows * cv_left_images[0].cols )));
+	std::vector<float> closeness(cv_left_images.size(), 0);
 	u_int index = 0;
 	
 // 	std::cout<<"uniform_histogram "<<cv_images[0].rows<<" "<< cv_images[0].cols<<std::endl;
@@ -188,7 +211,12 @@ void compare_histograms(){
 // 		}
 // 		std::cout<<std::endl;
 // 	}
-	for (auto &hist: cv_histograms) {
+	for (auto &hist: cv_left_histograms) {
+// 		visualizeHistogram(hist, "histogram");
+		closeness[index] = cv::compareHist(uniform_histogram, hist, CV_COMP_BHATTACHARYYA);
+		index ++;
+	}
+	for (auto &hist: cv_right_histograms) {
 // 		visualizeHistogram(hist, "histogram");
 		closeness[index] = cv::compareHist(uniform_histogram, hist, CV_COMP_BHATTACHARYYA);
 		index ++;
@@ -228,11 +256,18 @@ int main(int argc, char **argv) {
 	ros::NodeHandle nh;
 	
 	image_transport::ImageTransport it(nh);
-	nh.param<std::string>("image_topic", g_image_topic, g_image_topic);
+	nh.param<std::string>("image_topic", g_left_image_topic, g_left_image_topic);
 	nh.param<std::string>("node_name", g_param_node_name, g_param_node_name);
-	std::cout<<" image topic " << g_image_topic <<std::endl;
+	std::cout<<" image topic " << g_left_image_topic <<std::endl;
 	std::cout<<" node_name " << g_param_node_name <<std::endl;
-    image_transport::Subscriber sub = it.subscribe(g_image_topic, 1, imageCallback);
+//     image_transport::Subscriber sub = it.subscribe(g_left_image_topic, 1, imageCallback);
+	
+	message_filters::Subscriber<sensor_msgs::Image> image_Lsub(nh, g_left_image_topic , 1);
+	message_filters::Subscriber<sensor_msgs::Image> image_Rsub(nh, g_right_image_topic , 1);
+	
+	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> stereoSyncPolicy;
+	message_filters::Synchronizer<stereoSyncPolicy> sync(stereoSyncPolicy(10), image_Lsub, image_Rsub);
+	sync.registerCallback(boost::bind(&stereo_callback, _1, _2));
 	
 	std::cout<<"Started"<<std::endl;
 
